@@ -1,0 +1,71 @@
+# Windows Security GPO Audit Script
+# Based on: Guide GPO Sécurité Windows Server
+
+Write-Host "Starting Windows Security GPO Audit..." -ForegroundColor Cyan
+
+# Helper function
+function Check-Setting($Name, $Expected, $Actual) {
+    $status = if ($Expected -eq $Actual) { "✔️ OK" } else { "❌ Mismatch" }
+    Write-Host "$Name: $Actual (Expected: $Expected) => $status"
+}
+
+# --- 1. Password Policy ---
+Write-Host "`n[1] PASSWORD POLICY" -ForegroundColor Yellow
+$pwdPolicy = Get-ADDefaultDomainPasswordPolicy
+
+Check-Setting "Enforce password history" 24 $pwdPolicy.PasswordHistoryCount
+Check-Setting "Maximum password age (days)" 90 $pwdPolicy.MaxPasswordAge.Days
+Check-Setting "Minimum password age (days)" 1 $pwdPolicy.MinPasswordAge.Days
+Check-Setting "Minimum password length" 14 $pwdPolicy.MinPasswordLength
+Check-Setting "Password complexity enabled" True $pwdPolicy.ComplexityEnabled
+Check-Setting "Reversible encryption allowed" False $pwdPolicy.ReversibleEncryptionEnabled
+
+# --- 2. Account Lockout Policy ---
+Write-Host "`n[2] ACCOUNT LOCKOUT POLICY" -ForegroundColor Yellow
+$domain = [System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()
+$domainPolicy = (New-Object DirectoryServices.DirectoryEntry("LDAP://$($domain.Name)")).psbase.Children | 
+    Where-Object { $_.SchemaClassName -eq 'domainDNS' }
+
+Check-Setting "Account lockout threshold" 5 ($domainPolicy.lockoutThreshold -as [int])
+Check-Setting "Lockout duration (min)" 30 ($domainPolicy.lockoutDuration.Value.TotalMinutes -as [int])
+Check-Setting "Reset lockout counter (min)" 30 ($domainPolicy.lockoutObservationWindow.Value.TotalMinutes -as [int])
+
+# --- 3. Audit Policies ---
+Write-Host "`n[3] AUDIT POLICIES" -ForegroundColor Yellow
+$auditCategories = @(
+    "Account Logon", "Account Management", "Logon/Logoff", 
+    "Object Access", "Policy Change", "Privilege Use", "System"
+)
+
+foreach ($category in $auditCategories) {
+    $subcategories = (auditpol /get /category:$category | Select-String ".*Success|Failure").ToString().Trim()
+    Write-Host "$category:`n$subcategories`n"
+}
+
+# --- 4. Services Audit ---
+Write-Host "`n[4] CRITICAL SERVICES STATUS" -ForegroundColor Yellow
+$services = @{
+    "Telnet" = "Disabled"
+    "RemoteRegistry" = "Disabled"
+    "SNMP" = "Disabled"
+    "Print Spooler" = "Disabled"
+}
+
+foreach ($svc in $services.Keys) {
+    $svcStatus = Get-Service -Name $svc -ErrorAction SilentlyContinue
+    if ($svcStatus) {
+        Check-Setting "$svc Service" $services[$svc] $svcStatus.Status
+    } else {
+        Write-Host "$svc Service: Not installed"
+    }
+}
+
+# --- 5. PowerShell Logging ---
+Write-Host "`n[5] POWERSHELL LOGGING" -ForegroundColor Yellow
+$scriptBlock = Get-ItemProperty "HKLM:\Software\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging" -ErrorAction SilentlyContinue
+$transcription = Get-ItemProperty "HKLM:\Software\Policies\Microsoft\Windows\PowerShell\Transcription" -ErrorAction SilentlyContinue
+
+Check-Setting "ScriptBlockLogging" 1 ($scriptBlock.EnableScriptBlockLogging -as [int])
+Check-Setting "Transcription Enabled" 1 ($transcription.EnableTranscripting -as [int])
+
+Write-Host "`nAudit complete." -ForegroundColor Green
